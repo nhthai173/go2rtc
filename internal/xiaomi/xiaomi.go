@@ -50,6 +50,7 @@ func Init() {
 	})
 
 	api.HandleFunc("api/xiaomi", apiXiaomi)
+	api.HandleFunc("api/xiaomi/token", apiToken)
 	api.HandleFunc("api/xiaomi/quality", apiQuality)
 	api.HandleFunc("api/xiaomi/playback", apiPlayback)
 	api.HandleFunc("api/xiaomi/records", apiRecords)
@@ -340,7 +341,11 @@ func apiAuth(w http.ResponseWriter, r *http.Request) {
 		}
 		cloudsMu.Unlock()
 
-		err = app.PatchConfig([]string{"xiaomi", userID}, token)
+		if err = app.PatchConfig([]string{"xiaomi", userID}, token); err == nil {
+			// An embedding app (cctv-stream TV app) keeps the token itself, so hand it back.
+			api.ResponseJSON(w, map[string]string{"id": userID, "token": token})
+			return
+		}
 	}
 
 	if err != nil {
@@ -407,4 +412,25 @@ func apiRecords(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	api.ResponseJSON(w, recs)
+}
+
+// apiToken: PUT /api/xiaomi/token?id=<user id>&token=<token> hands a login token to a running go2rtc, which
+// otherwise reads tokens from its config at start only. An embedding app uses it so that learning a token
+// does not restart go2rtc and drop every P2P session.
+func apiToken(w http.ResponseWriter, r *http.Request) {
+	id, token := r.URL.Query().Get("id"), r.URL.Query().Get("token")
+	if id == "" || token == "" {
+		http.Error(w, "id and token are required", http.StatusBadRequest)
+		return
+	}
+
+	cloudsMu.Lock()
+	if tokens == nil {
+		tokens = map[string]string{}
+	}
+	if tokens[id] != token {
+		tokens[id] = token
+		delete(clouds, id) // logged in with the old token
+	}
+	cloudsMu.Unlock()
 }

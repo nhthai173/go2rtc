@@ -158,8 +158,8 @@ func (f *fakeNetwork) serveDevice() {
 
 func TestHandshakeDirect(t *testing.T) {
 	f := newFakeNetwork(t)
-	mainServer = f.server.LocalAddr().String()
-	t.Cleanup(func() { mainServer = "www.easy4ipcloud.com:8800"; clockOffset.Store(0) })
+	MainServer = f.server.LocalAddr().String()
+	t.Cleanup(func() { MainServer = "www.easy4ipcloud.com:8800"; clockOffset.Store(0) })
 
 	conn, sess, err := openSession("SERIAL123", false, &Cred{User: "admin", Password: "pw", ClientID: "uuid:37777"})
 	require.NoError(t, err)
@@ -184,8 +184,8 @@ func TestHandshakeDirect(t *testing.T) {
 
 func TestHandshakeRelay(t *testing.T) {
 	f := newFakeNetwork(t)
-	mainServer = f.server.LocalAddr().String()
-	t.Cleanup(func() { mainServer = "www.easy4ipcloud.com:8800"; clockOffset.Store(0) })
+	MainServer = f.server.LocalAddr().String()
+	t.Cleanup(func() { MainServer = "www.easy4ipcloud.com:8800"; clockOffset.Store(0) })
 
 	conn, _, err := openSession("SERIAL123", true, nil)
 	require.NoError(t, err)
@@ -197,8 +197,8 @@ func TestHandshakeErrors(t *testing.T) {
 	srv, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = srv.Close() })
-	mainServer = srv.LocalAddr().String()
-	t.Cleanup(func() { mainServer = "www.easy4ipcloud.com:8800" })
+	MainServer = srv.LocalAddr().String()
+	t.Cleanup(func() { MainServer = "www.easy4ipcloud.com:8800" })
 
 	// the cloud does not know this serial
 	go func() {

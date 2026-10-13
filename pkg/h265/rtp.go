@@ -119,7 +119,8 @@ func RTPPay(mtu uint16, handler core.HandlerFunc) core.HandlerFunc {
 		mtu = 1472
 	}
 
-	payloader := &Payloader{}
+	// Single NAL units only: Media3 before 1.8 cannot read aggregation packets (VPS+SPS+PPS).
+	payloader := &Payloader{SkipAggregation: true}
 	sequencer := rtp.NewRandomSequencer()
 	mtu -= 12 // rtp.Header size
 

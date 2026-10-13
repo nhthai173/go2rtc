@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"os"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -181,6 +182,7 @@ type device struct {
 type listener struct {
 	net.Listener
 	port int
+	addr string // as requested; empty for "any free port"
 }
 
 func getDevice(serial, user, pass, clientID string, relay bool) *device {
@@ -223,19 +225,33 @@ func (d *device) close() {
 	d.mu.Unlock()
 }
 
-// listen returns the loopback port that tunnels to a device port, opening it on first use.
+// listen returns the loopback port that tunnels to a device port, opening a random one on first use.
 func (d *device) listen(devPort int) (int, error) {
+	return d.listenAt(devPort, "")
+}
+
+// listenAt tunnels a device port to addr (empty: any free loopback port). Asking again for the same
+// addr, or for any port when one is open already, returns the open listener; another addr rebinds.
+func (d *device) listenAt(devPort int, addr string) (int, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
 	if l := d.lns[devPort]; l != nil {
-		return l.port, nil
+		if addr == "" || addr == l.addr {
+			return l.port, nil
+		}
+		_ = l.Close()
+		delete(d.lns, devPort)
 	}
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	bind := addr
+	if bind == "" {
+		bind = "127.0.0.1:0"
+	}
+	ln, err := net.Listen("tcp", bind)
 	if err != nil {
 		return 0, err
 	}
-	l := &listener{Listener: ln, port: ln.Addr().(*net.TCPAddr).Port}
+	l := &listener{Listener: ln, port: ln.Addr().(*net.TCPAddr).Port, addr: addr}
 	d.lns[devPort] = l
 	go d.accept(l, devPort)
 	return l.port, nil
@@ -268,27 +284,78 @@ func (d *device) proxy(conn net.Conn, devPort int) {
 	_, _ = io.Copy(conn, s)
 }
 
-// apiDahua: GET /api/easy4ip -> [{"serial":"..","up":true,"ports":{"554":41234},"stats":{...}}]
+type deviceInfo struct {
+	Serial string         `json:"serial"`
+	Up     bool           `json:"up"`
+	Ports  map[string]int `json:"ports"`
+	Stats  easy4ip.Stats  `json:"stats"`
+}
+
+func (d *device) info() deviceInfo {
+	it := deviceInfo{Serial: d.serial, Up: d.client.Ready(), Ports: map[string]int{}, Stats: d.client.Stats()}
+	d.mu.Lock()
+	for dev, l := range d.lns {
+		it.Ports[strconv.Itoa(dev)] = l.port
+	}
+	d.mu.Unlock()
+	return it
+}
+
+// apiDahua manages devices without a stream URL, for programs that embed go2rtc and want fixed ports:
+//
+//	GET    /api/easy4ip                                       list: [{"serial":"..","up":true,"ports":{"554":41234},"stats":{..}}]
+//	PUT    /api/easy4ip?serial=..&user=..&password=..&tunnel=554:127.0.0.1:5554&tunnel=80:127.0.0.1:5580
+//	                                                        start the session (in the background) and open the tunnels;
+//	                                                        optional client_id=, relay=1
+//	DELETE /api/easy4ip?serial=..                             end the session and close its tunnels
 func apiDahua(w http.ResponseWriter, r *http.Request) {
-	type item struct {
-		Serial string         `json:"serial"`
-		Up     bool           `json:"up"`
-		Ports  map[string]int `json:"ports"`
-		Stats  easy4ip.Stats  `json:"stats"`
-	}
-	items := []item{}
+	q := r.URL.Query()
 
-	mu.Lock()
-	for _, d := range devices {
-		it := item{Serial: d.serial, Up: d.client.Ready(), Ports: map[string]int{}, Stats: d.client.Stats()}
-		d.mu.Lock()
-		for dev, l := range d.lns {
-			it.Ports[strconv.Itoa(dev)] = l.port
+	switch r.Method {
+	case "PUT", "POST":
+		serial, user := q.Get("serial"), q.Get("user")
+		if serial == "" || user == "" {
+			http.Error(w, "serial and user are required", http.StatusBadRequest)
+			return
 		}
-		d.mu.Unlock()
-		items = append(items, it)
-	}
-	mu.Unlock()
+		clientID := q.Get("client_id")
+		if clientID == "" {
+			clientID = defaultClientID(serial)
+		}
+		d := getDevice(serial, user, q.Get("password"), clientID, q.Get("relay") == "1")
 
-	api.ResponseJSON(w, items)
+		for _, t := range q["tunnel"] { // <device port>:<listen address>
+			port, addr, ok := strings.Cut(t, ":")
+			n, err := strconv.Atoi(port)
+			if !ok || err != nil {
+				http.Error(w, "bad tunnel "+t, http.StatusBadRequest)
+				return
+			}
+			if _, err = d.listenAt(n, addr); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+		}
+		api.ResponseJSON(w, d.info())
+
+	case "DELETE":
+		mu.Lock()
+		d := devices[q.Get("serial")]
+		delete(devices, q.Get("serial"))
+		mu.Unlock()
+		if d == nil {
+			http.Error(w, "unknown serial", http.StatusNotFound)
+			return
+		}
+		d.close()
+
+	default:
+		items := []deviceInfo{}
+		mu.Lock()
+		for _, d := range devices {
+			items = append(items, d.info())
+		}
+		mu.Unlock()
+		api.ResponseJSON(w, items)
+	}
 }

@@ -24,8 +24,8 @@ import (
 // Easy4IP P2P handshake of Dahua/KBVision devices (DMSS, Imou...), ported from dh-p2p (MIT).
 // Rust used panics for every failure; here each one is an error the supervisor retries.
 
-// mainServer is a variable only so tests can point it at a fake.
-var mainServer = "www.easy4ipcloud.com:8800"
+// MainServer is the Easy4IP entry point. A variable so tests can point it at a fake.
+var MainServer = "www.easy4ipcloud.com:8800"
 
 const (
 	// username/key of the public Dahua app registration, same as in upstream dh-p2p
@@ -377,7 +377,7 @@ func handshake(s1, s2 *peerConn, serial string, relay bool, cred *Cred, deadline
 		return c.read()
 	}
 
-	if err := s1.connect(mainServer); err != nil {
+	if err := s1.connect(MainServer); err != nil {
 		return nil, err
 	}
 	if _, err := ask(d1, "/probe/p2psrv", ""); err != nil {
@@ -470,7 +470,7 @@ func handshake(s1, s2 *peerConn, serial string, relay bool, cred *Cred, deadline
 		return nil, err
 	}
 
-	if err = s2.connect(mainServer); err != nil {
+	if err = s2.connect(MainServer); err != nil {
 		return nil, err
 	}
 	auth, clientTag = signed("")
