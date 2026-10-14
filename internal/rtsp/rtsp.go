@@ -105,6 +105,7 @@ func rtspHandler(rawURL string) (core.Producer, error) {
 		conn.Media = query.Get("media")
 		conn.Timeout = core.Atoi(query.Get("timeout"))
 		conn.Transport = query.Get("transport")
+		conn.Scale = query.Get("scale")
 	}
 
 	if log.Trace().Enabled() {
