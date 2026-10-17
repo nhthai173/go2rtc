@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"io"
 	"sync"
 	"time"
@@ -120,9 +121,10 @@ func (c *Client) run() {
 		default:
 		}
 
+		t0 := time.Now()
 		sock, st, err := openSession(c.cfg.Serial, c.cfg.Relay, c.cfg.Cred)
 		if err != nil {
-			warnf("handshake failed (%v), retrying in %v", err, backoff)
+			warnf("handshake failed after %s (%v), retrying in %v", time.Since(t0).Round(100*time.Millisecond), err, backoff)
 			select {
 			case <-time.After(backoff):
 			case <-c.stop:
@@ -143,7 +145,7 @@ func (c *Client) run() {
 		}
 		c.mu.Unlock()
 		c.set(l)
-		logf("easy4ip: PTCP session established")
+		warnf("trace: session established, handshake took %s", time.Since(t0).Round(100*time.Millisecond))
 		if c.cfg.OnState != nil {
 			c.cfg.OnState(true)
 		}
@@ -234,6 +236,13 @@ type live struct {
 	recvWraps          int
 	sentWraps          int
 
+	started time.Time
+	lastRx  time.Time // guarded by mu
+	rxPkts  int
+	rxData  int // payload bytes from the device
+	txData  int
+	devEvt  string // last status/command the device sent, guarded by mu
+
 	events chan event
 	done   chan struct{}
 	once   sync.Once
@@ -246,6 +255,8 @@ func newLive(sock *peerConn, st *ptcp) *live {
 	return &live{
 		sock:    sock,
 		st:      st,
+		started: time.Now(),
+		lastRx:  time.Now(),
 		events:  make(chan event, 128),
 		done:    make(chan struct{}),
 		streams: map[uint32]*Stream{},
@@ -279,7 +290,36 @@ func (l *live) serve() {
 	go l.writer()
 	go l.heartbeat()
 	go l.retransmitter()
+	go l.trace()
 	l.reader()
+}
+
+// trace logs one line per 10 s so a drop can be traced after the fact: whether rx fell before the
+// device went silent, whether retransmits/NACKs piled up first, and what the device last said.
+func (l *live) trace() {
+	t := time.NewTicker(10 * time.Second)
+	defer t.Stop()
+	for {
+		select {
+		case <-t.C:
+			warnf("trace: %s", l.summary())
+		case <-l.done:
+			return
+		}
+	}
+}
+
+func (l *live) summary() string {
+	l.mu.Lock()
+	st, silent, rx, tx, pk, ev := l.st, time.Since(l.lastRx), l.rxData, l.txData, l.rxPkts, l.devEvt
+	line := fmt.Sprintf("age=%s silent=%s rx=%dKB tx=%dKB pkts=%d unacked=%d ooo=%d nack=%d gap=%d dup=%d rtx=%d last-dev-event=%q",
+		time.Since(l.started).Round(time.Second), silent.Round(100*time.Millisecond), rx>>10, tx>>10, pk,
+		len(st.unacked), len(st.ooo), st.nacks, st.gaps, st.dups, st.rtx, ev)
+	l.mu.Unlock()
+	l.streamsMu.Lock()
+	n := len(l.streams)
+	l.streamsMu.Unlock()
+	return fmt.Sprintf("%s streams=%d", line, n)
 }
 
 func (l *live) shutdown() {
@@ -338,6 +378,9 @@ func (l *live) writer() {
 		}
 
 		l.mu.Lock()
+		if b.kind == kindPayload {
+			l.txData += len(b.data)
+		}
 		p := l.st.send(b)
 		l.countWraps()
 		l.mu.Unlock()
@@ -370,12 +413,17 @@ func (l *live) reader() {
 		_ = l.sock.SetReadDeadline(time.Now().Add(deadAfter))
 		p, err := l.sock.readPacket()
 		if err != nil {
-			warnf("device silent for %v or socket closed: %v", deadAfter, err)
+			warnf("device silent for %v or socket closed: %v; %s", deadAfter, err, l.summary())
 			return
 		}
 
 		hasBody := p.body.size() > 0
 		l.mu.Lock()
+		l.lastRx = time.Now()
+		l.rxPkts++
+		if p.body.kind == kindPayload {
+			l.rxData += len(p.body.data)
+		}
 		bodies := l.st.accept(p)
 		l.countWraps()
 		// Ack every data-bearing packet, including duplicates and gaps: repeated acks of the same
@@ -409,6 +457,10 @@ func (l *live) countWraps() {
 func (l *live) dispatch(b *body) {
 	switch b.kind {
 	case kindStatus:
+		l.mu.Lock()
+		l.devEvt = fmt.Sprintf("%s realm=%08x at age %s", b.status, b.realm, time.Since(l.started).Round(time.Second))
+		l.mu.Unlock()
+		warnf("trace: device status %s realm=%08x age=%s", b.status, b.realm, time.Since(l.started).Round(time.Second))
 		l.streamsMu.Lock()
 		s := l.streams[b.realm]
 		if s != nil && b.status == "DISC" {
@@ -428,6 +480,11 @@ func (l *live) dispatch(b *body) {
 			logf("easy4ip: realm %08x closed by device", b.realm)
 			s.eof()
 		}
+	case kindCommand:
+		l.mu.Lock()
+		l.devEvt = fmt.Sprintf("cmd %x at age %s", b.cmd, time.Since(l.started).Round(time.Second))
+		l.mu.Unlock()
+		warnf("trace: device command %x age=%s", b.cmd, time.Since(l.started).Round(time.Second))
 	case kindPayload:
 		l.streamsMu.Lock()
 		s := l.streams[b.realm]

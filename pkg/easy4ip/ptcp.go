@@ -184,6 +184,9 @@ type ptcp struct {
 	rmid       uint32
 	ooo        map[uint32]*packet
 	unacked    []unacked
+
+	// trace counters, logged by live.trace
+	nacks, gaps, dups, rtx int
 }
 
 func newPTCP() *ptcp { return &ptcp{ooo: map[uint32]*packet{}} }
@@ -237,6 +240,7 @@ func (s *ptcp) accept(p *packet) []*body {
 	}
 
 	if from, ok := nackOffset(p.body); ok {
+		s.nacks++
 		// make everything from the requested offset due now; the retransmitter picks it up
 		due := time.Now().Add(-rto)
 		for i := range s.unacked {
@@ -249,9 +253,11 @@ func (s *ptcp) accept(p *packet) []*body {
 
 	d := seqDiff(p.sent, s.recv)
 	if d < 0 {
+		s.dups++
 		return nil
 	}
 	if d > 0 {
+		s.gaps++
 		if len(s.ooo) < maxOOO {
 			s.ooo[p.sent] = p
 		}
@@ -284,6 +290,7 @@ func (s *ptcp) dueRetransmits() []*packet {
 		if now.Sub(u.lastSent) >= rto {
 			u.lastSent = now
 			out = append(out, s.stamp(u.sent, u.body))
+			s.rtx++
 		}
 	}
 	return out
