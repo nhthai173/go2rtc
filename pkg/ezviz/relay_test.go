@@ -7,6 +7,8 @@ import (
 	"encoding/base64"
 	"encoding/binary"
 	"net"
+	"net/url"
+	"strings"
 	"testing"
 	"time"
 )
@@ -216,3 +218,16 @@ func TestRelayEncryptedWithoutCode(t *testing.T) {
 type nopConn struct{ net.Conn }
 
 func (nopConn) Close() error { return nil }
+
+func TestPlaybackURL(t *testing.T) {
+	r := &relayInfo{host: "h", port: 8554, token: "tk", biz: url.Values{"biz": {"2"}}}
+	u, err := r.playbackURL(config{serial: "S", channel: 2, start: "2026-10-26T12:28:34", stop: "2026-10-26T12:29:10"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"/playback?", "begin=20261026T122834Z", "end=20261026T122910Z", "serial=S", "chn=2", "tls=0", "lid="} {
+		if !strings.Contains(u, want) {
+			t.Errorf("%q missing %q", u, want)
+		}
+	}
+}

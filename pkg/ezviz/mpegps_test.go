@@ -194,3 +194,28 @@ func TestPSDemuxerFragmented(t *testing.T) {
 		}
 	}
 }
+
+// A PES whose scrambling_control bits are set marks the access unit it opens as scrambled.
+func TestPSDemuxerScramblingFlag(t *testing.T) {
+	scrambled := psPES(pesVideo, nal(hevcTRL, 1, 2, 3), 9000)
+	scrambled[6] |= 0x20
+	clear := psPES(pesVideo, nal(hevcTRL, 4, 5, 6), 18000)
+	var out []*Frame
+	d := newPSDemuxer()
+	for _, b := range [][]byte{psPackHeader(), scrambled, psPackHeader(), clear, psPackHeader(), psPES(pesVideo, nal(hevcTRL, 7), 27000)} {
+		out = append(out, d.write(b)...)
+	}
+	if len(out) != 2 || !out[0].Enc || out[1].Enc {
+		t.Fatalf("frames %d, want 2 with the first scrambled: %+v", len(out), out)
+	}
+}
+
+func TestParseURLSpeed(t *testing.T) {
+	c, err := parseURL("hikconnect://a:b@api.hik-connect.com/S?channel=2&code=ABC&start=2026-10-26T12:28:34&speed=2")
+	if err != nil || c.speed != 2 || !c.isPlayback() || !c.relay {
+		t.Fatalf("%+v %v", c, err)
+	}
+	if _, err = parseURL("hikconnect://a:b@api.hik-connect.com/S?speed=0"); err == nil {
+		t.Fatal("speed 0 accepted")
+	}
+}

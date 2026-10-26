@@ -35,6 +35,8 @@ const (
 	vtmChanEncMessage = 0x0a
 	vtmChanEncStream  = 0x0b
 
+	vtmSpeedReq      = 0x13f // playback speed: ssn + varint multiplier
+	vtmStopReq       = 0x130 // sent by the app when it closes a session
 	vtmKeepaliveReq  = 0x132
 	vtmKeepaliveRsp  = 0x133
 	vtmStreamInfoReq = 0x13b
@@ -54,6 +56,11 @@ const (
 	relayMaxHops     = 4
 )
 
+// relayBusyResult is the StreamInfoRsp result when the device has no free stream slot.
+const relayBusyResult = 5416
+
+var errRelayBusy = errors.New("ezviz: relay: device has no free stream slot (result 5416)")
+
 // relayClient is a frameSource backed by the cloud relay.
 type relayClient struct {
 	cfg   cfgView
@@ -70,6 +77,10 @@ type relayClient struct {
 	mu        sync.Mutex
 	err       error
 
+	key       string     // playback: registry key, see playing
+	pb        *psDemuxer // playback: the stream channel carries an MPEG-PS, not RTP
+	lastMedia time.Time  // playback: last time the device sent media (it sends no end marker)
+
 	frameNo uint32
 	fu      []byte // FU reassembly buffer (NAL header + body so far)
 	fuEnc   bool
@@ -82,13 +93,12 @@ type cfgView struct {
 }
 
 func dialRelay(cfg config) (*relayClient, error) {
-	if cfg.isPlayback() {
-		return nil, errors.New("ezviz: relay does not support playback")
-	}
-
 	c := &relayClient{
 		frames: make(chan *Frame, 128),
 		done:   make(chan struct{}),
+	}
+	if cfg.isPlayback() {
+		c.pb = newPSDemuxer()
 	}
 	if cfg.code != "" {
 		key := make([]byte, 16)
@@ -96,12 +106,13 @@ func dialRelay(cfg config) (*relayClient, error) {
 		c.block, _ = aes.NewCipher(key)
 	}
 
-	api := newAPIClient(cfg.baseURL)
-	if err := api.login(cfg.account, cfg.password); err != nil {
+	api, err := sessionFor(cfg.baseURL, cfg.account, cfg.password)
+	if err != nil {
 		return nil, err
 	}
 	info, err := api.getRelayInfo(cfg.serial, cfg.channel)
 	if err != nil {
+		dropSession(cfg.baseURL, cfg.account, cfg.password) // maybe a stale session: next try logs in again
 		return nil, err
 	}
 
@@ -109,8 +120,30 @@ func dialRelay(cfg config) (*relayClient, error) {
 	if cfg.subtype == "sub" {
 		stream = 2
 	}
-	if err = c.connect(info.streamURL(cfg.serial, cfg.channel, stream)); err != nil {
+	streamURL := info.streamURL(cfg.serial, cfg.channel, stream)
+	if cfg.isPlayback() {
+		if streamURL, err = info.playbackURL(cfg); err != nil {
+			return nil, err
+		}
+	}
+	// A slot freed by Close (or a seek) can take a moment to be released: the relay
+	// answers 5416 until then.
+	for try := 0; ; try++ {
+		if err = c.connect(streamURL); err == nil || !errors.Is(err, errRelayBusy) || try == 5 {
+			break
+		}
+		time.Sleep(time.Second)
+	}
+	if err != nil {
 		return nil, err
+	}
+
+	if cfg.isPlayback() && cfg.speed > 1 {
+		_ = c.SetSpeed(cfg.speed)
+	}
+	if cfg.isPlayback() {
+		c.key = fmt.Sprintf("%s/%d", cfg.serial, cfg.channel)
+		playing.Store(c.key, c) // a newer session of the same channel replaces the old one
 	}
 
 	go c.readLoop()
@@ -154,6 +187,10 @@ func (c *relayClient) connect(streamURL string) error {
 			conn.Close()
 			streamURL, key = info.url, info.key
 			continue
+		}
+		if info.result == relayBusyResult {
+			conn.Close()
+			return errRelayBusy
 		}
 		if info.result != 0 {
 			conn.Close()
@@ -257,6 +294,11 @@ func (c *relayClient) readLoop() {
 		case ch == vtmChanEncStream || ch == vtmChanEncMessage || code == vtmECDHNotify:
 			c.fail(errors.New("ezviz: relay requires end-to-end (ECDH) encryption, which is not supported"))
 			return
+		case ch == vtmChanStream && c.pb != nil:
+			if err = c.handlePS(body); err != nil {
+				c.fail(err)
+				return
+			}
 		case ch == vtmChanStream:
 			if err = c.handleRTP(body); err != nil {
 				c.fail(err)
@@ -264,6 +306,12 @@ func (c *relayClient) readLoop() {
 			}
 		case code == vtmKeepaliveReq:
 			_ = c.write(vtmChanMessage, vtmKeepaliveRsp, appendStringField(nil, 1, c.ssn))
+		}
+		// The relay keeps answering keepalives after the last recording byte, so
+		// the end of a window is media silence, as on the P2P transport.
+		if c.pb != nil && !c.lastMedia.IsZero() && time.Since(c.lastMedia) >= playbackIdleTimeout {
+			c.fail(io.EOF)
+			return
 		}
 	}
 }
@@ -323,6 +371,39 @@ func (c *relayClient) handleRTP(b []byte) error {
 		c.push(&Frame{Codec: CodecPCMU, Payload: append([]byte(nil), pl...), Timestamp: ts})
 	}
 	return nil
+}
+
+// handlePS demuxes one chunk of the recording's MPEG program stream. PES packets
+// flagged as scrambled carry the same AES-ECB-scrambled NAL bodies as live RTP.
+func (c *relayClient) handlePS(b []byte) error {
+	c.lastMedia = time.Now()
+	for _, f := range c.pb.write(b) {
+		if f.Enc {
+			if c.block == nil {
+				return errors.New("ezviz: stream is encrypted: add the device verification code as code=... to the URL")
+			}
+			switch f.Codec {
+			case CodecH265:
+				if sc := startCodeLen(f.Payload); sc > 0 {
+					decryptNAL(c.block, f.Payload[sc:])
+				}
+			case CodecPCMA:
+				decryptECB(c.block, f.Payload)
+			}
+		}
+		c.push(f)
+	}
+	return nil
+}
+
+func startCodeLen(b []byte) int {
+	switch {
+	case len(b) > 4 && b[0] == 0 && b[1] == 0 && b[2] == 1:
+		return 3
+	case len(b) > 4 && b[0] == 0 && b[1] == 0 && b[2] == 0 && b[3] == 1:
+		return 4
+	}
+	return 0
 }
 
 // videoPacket reassembles RFC 7798 H.265 payloads into whole NAL units.
@@ -420,8 +501,35 @@ func (c *relayClient) ReadFrame() (*Frame, error) {
 }
 
 func (c *relayClient) Close() error {
+	if c.key != "" {
+		playing.CompareAndDelete(c.key, c)
+	}
+	// Tell the relay the session is over: the device allows only a few streams at
+	// once and a bare TCP close leaves the slot taken for a while.
+	if c.ssn != "" {
+		_ = c.write(vtmChanMessage, vtmStopReq, appendStringField(nil, 1, c.ssn))
+	}
 	c.fail(io.EOF)
 	return nil
+}
+
+// playing holds the running playback session of each serial/channel, so an API
+// call can change its speed without a handle on the stream.
+var playing sync.Map
+
+// SetPlaybackSpeed changes the speed of the running playback of a channel.
+func SetPlaybackSpeed(serial string, channel, n int) error {
+	c, ok := playing.Load(fmt.Sprintf("%s/%d", serial, channel))
+	if !ok {
+		return errors.New("ezviz: no playback running on this channel")
+	}
+	return c.(*relayClient).SetSpeed(n)
+}
+
+// SetSpeed asks the relay to deliver the recording n times faster than real time
+// (the app offers 1/8x..8x; 2 and 4 are the values seen on the wire).
+func (c *relayClient) SetSpeed(n int) error {
+	return c.write(vtmChanMessage, vtmSpeedReq, appendVarintField(appendStringField(nil, 1, c.ssn), 2, uint64(n)))
 }
 
 func (c *relayClient) Protocol() string   { return "tcp" }

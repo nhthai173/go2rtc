@@ -19,6 +19,7 @@ const (
 // audio clock; the producer forwards it verbatim.
 type Frame struct {
 	Codec     byte
+	Enc       bool   // playback video: the NAL body is scrambled with the device verification code
 	Payload   []byte // video: Annex-B NAL units; audio: raw G.711 samples
 	Timestamp uint32 // video: 90 kHz PTS; audio: 8 kHz sample clock
 	FrameNo   uint32

@@ -31,6 +31,7 @@ type config struct {
 	// (busType=1) leaves these zero.
 	start string // recording window start, device format YYYY-MM-DDThh:mm:ss
 	stop  string // recording window end (empty => open-ended, stream to live edge)
+	speed int    // relay playback only: start at this speed (the relay delivers faster than real time)
 }
 
 // playbackMode is the three-way source selection derived from the URL window.
@@ -142,6 +143,11 @@ func parseURL(rawURL string) (config, error) {
 	if v := q.Get("end"); v != "" {
 		if cfg.stop, err = parsePlaybackTime(v); err != nil {
 			return config{}, fmt.Errorf("ezviz: bad end %q: %w", v, err)
+		}
+	}
+	if v := q.Get("speed"); v != "" {
+		if cfg.speed, err = strconv.Atoi(v); err != nil || cfg.speed < 1 {
+			return config{}, fmt.Errorf("ezviz: bad speed %q", v)
 		}
 	}
 	if cfg.stop != "" && !cfg.isPlayback() {

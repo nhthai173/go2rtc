@@ -2,6 +2,7 @@ package ezviz
 
 import (
 	"fmt"
+	"time"
 
 	"github.com/AlexxIT/go2rtc/pkg/core"
 	"github.com/AlexxIT/go2rtc/pkg/h264"
@@ -14,7 +15,8 @@ import (
 // cloud P2P transport, emitting whole H.265/H.264 access units into go2rtc.
 type Producer struct {
 	core.Connection
-	client frameSource
+	client   frameSource
+	playback bool
 }
 
 // frameSource is a transport that yields demuxed access units: the direct P2P
@@ -36,7 +38,9 @@ func NewProducer(rawURL string) (*Producer, error) {
 	audio := &core.Codec{Name: core.CodecPCMA, ClockRate: 8000, PayloadType: 8}
 	if cfg.relay {
 		client, err = dialRelay(cfg)
-		audio = &core.Codec{Name: core.CodecPCMU, ClockRate: 8000, PayloadType: 0}
+		if !cfg.isPlayback() { // recordings carry A-law like P2P
+			audio = &core.Codec{Name: core.CodecPCMU, ClockRate: 8000, PayloadType: 0}
+		}
 	} else {
 		client, err = Dial(rawURL)
 	}
@@ -60,7 +64,8 @@ func NewProducer(rawURL string) (*Producer, error) {
 			Medias:     medias,
 			Transport:  client,
 		},
-		client: client,
+		client:   client,
+		playback: cfg.isPlayback(),
 	}, nil
 }
 
@@ -139,6 +144,10 @@ func probe(client frameSource, audio *core.Codec) ([]*core.Media, error) {
 }
 
 func (p *Producer) Start() error {
+	if p.playback {
+		p.awaitConsumer()
+	}
+	keyed := false // a picture that starts mid-GOP is garbage until the next keyframe: drop slices before the first one
 	for {
 		f, err := p.client.ReadFrame()
 		if err != nil {
@@ -146,6 +155,18 @@ func (p *Producer) Start() error {
 		}
 		if f == nil {
 			continue
+		}
+
+		if !keyed && (f.Codec == CodecH265 || f.Codec == CodecH264) {
+			if sc := startCodeLen(f.Payload); sc > 0 {
+				b := f.Payload[sc]
+				switch {
+				case f.Codec == CodecH265 && (b>>1)&0x3f >= 16 && (b>>1)&0x3f <= 21, f.Codec == CodecH264 && b&0x1f == 5:
+					keyed = true
+				case f.Codec == CodecH265 && (b>>1)&0x3f < 32, f.Codec == CodecH264 && b&0x1f < 5:
+					continue
+				}
+			}
 		}
 
 		var name string
@@ -174,5 +195,23 @@ func (p *Producer) Start() error {
 				break
 			}
 		}
+	}
+}
+
+// awaitConsumer holds a recording back until a consumer is attached and has had a
+// moment to start playing. A recording starts streaming at its first keyframe as
+// soon as it is opened, while live keeps producing keyframes; dropping that first
+// keyframe would leave the picture black until the next one, seconds later.
+// Frames wait in the transport's buffer meanwhile.
+// ponytail: fixed grace period; a per-sender "playing" signal would be exact.
+func (p *Producer) awaitConsumer() {
+	for i := 0; i < 100; i++ {
+		for _, r := range p.Receivers {
+			if len(r.Senders()) > 0 {
+				time.Sleep(time.Second)
+				return
+			}
+		}
+		time.Sleep(50 * time.Millisecond)
 	}
 }

@@ -43,6 +43,7 @@ type psDemuxer struct {
 	auData []byte
 	auPTS  uint32
 	auOpen bool
+	auEnc  bool // the PES that opened the AU has scrambling_control set (device-key AES, see relay.go)
 
 	videoSeq uint32
 	audioSeq uint32
@@ -115,10 +116,11 @@ func (d *psDemuxer) parse() []*Frame {
 			pkt := d.buf[i+6 : i+pktLen]
 			es, pts, hasPTS := parsePESPayload(pkt)
 			if sid >= sidVideoMin {
-				out = d.feedVideo(out, es, pts, hasPTS)
+				out = d.feedVideo(out, es, pts, hasPTS, pkt[0]&0x30 != 0)
 			} else if len(es) > 0 {
 				out = append(out, &Frame{
 					Codec:     CodecPCMA,
+					Enc:       pkt[0]&0x30 != 0,
 					Payload:   cloneBytes(es),
 					Timestamp: rescale(pts, 90000, 8000),
 					FrameNo:   d.nextAudioSeq(),
@@ -143,7 +145,7 @@ func (d *psDemuxer) commit(consumed int, out []*Frame) []*Frame {
 
 // feedVideo appends a video PES payload to the current access unit. A PES that
 // carries a PTS closes the previous AU and opens a new one.
-func (d *psDemuxer) feedVideo(out []*Frame, es []byte, pts uint64, hasPTS bool) []*Frame {
+func (d *psDemuxer) feedVideo(out []*Frame, es []byte, pts uint64, hasPTS, enc bool) []*Frame {
 	if hasPTS && d.auOpen {
 		out = append(out, d.emitAU()...)
 		d.auData = d.auData[:0]
@@ -154,6 +156,7 @@ func (d *psDemuxer) feedVideo(out []*Frame, es []byte, pts uint64, hasPTS bool) 
 		// the same way the 90 kHz clock does.
 		d.auPTS = uint32(pts)
 		d.auOpen = true
+		d.auEnc = enc
 	}
 	d.auData = append(d.auData, es...)
 	return out
@@ -167,6 +170,7 @@ func (d *psDemuxer) emitAU() []*Frame {
 	for _, nal := range splitAnnexB(d.auData) {
 		out = append(out, &Frame{
 			Codec:     CodecH265,
+			Enc:       d.auEnc,
 			Payload:   nal,
 			Timestamp: ts,
 			FrameNo:   d.nextVideoSeq(),
