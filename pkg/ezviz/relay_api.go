@@ -282,7 +282,7 @@ func RecordsRange(baseURL, account, password, serial string, channel int, from, 
 		return nil, err
 	}
 	const layout = "2006-01-02T15:04:05"
-	var all []Record
+	all := []Record{} // not nil: the API answers [] and not null when a day has no recording
 	start := from + " 00:00:00"
 	for page := 0; page < 100; page++ {
 		q := url.Values{
@@ -325,7 +325,7 @@ func RecordedDays(baseURL, account, password, serial string, channel int, month 
 	if err != nil {
 		return nil, err
 	}
-	var days []string
+	days := []string{}
 	for _, r := range recs {
 		if d := r.Begin[:10]; len(days) == 0 || days[len(days)-1] != d {
 			days = append(days, d)
