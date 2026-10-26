@@ -82,6 +82,7 @@ type relayClient struct {
 	lastMedia time.Time  // playback: last time the device sent media (it sends no end marker)
 
 	frameNo uint32
+	audioNo uint32
 	fu      []byte // FU reassembly buffer (NAL header + body so far)
 	fuEnc   bool
 }
@@ -368,7 +369,8 @@ func (c *relayClient) handleRTP(b []byte) error {
 		if enc {
 			decryptECB(c.block, pl)
 		}
-		c.push(&Frame{Codec: CodecPCMU, Payload: append([]byte(nil), pl...), Timestamp: ts})
+		c.audioNo++ // the RTSP consumers order packets by this: a constant sequence number makes ExoPlayer drop the audio
+		c.push(&Frame{Codec: CodecPCMU, Payload: append([]byte(nil), pl...), Timestamp: ts, FrameNo: c.audioNo})
 	}
 	return nil
 }
