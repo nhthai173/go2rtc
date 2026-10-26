@@ -131,3 +131,26 @@ this implementation. So "relayed" here means relayed control, not relayed video.
 
 See `pkg/ezviz/PROTOCOL.md` for the full wire format and the direct-vs-relayed
 breakdown.
+
+## Cloud relay (devices that refuse direct P2P)
+
+Some devices are online in Hik-Connect but the P2P servers answer "device unavailable for P2P"
+(`0x101012`), which is what the official apps work around by streaming through the cloud
+relay (VTM/VTDU, TCP). Add the device **verification code** (the "stream encryption" key, 6
+characters on the device label or set in the app) as `code=`; its presence selects the relay:
+
+```yaml
+streams:
+  nvr_ch1: hikconnect://ACCOUNT:PASSWORD@api.hik-connect.com/SERIAL?channel=1&code=VERIFICATIONCODE
+```
+
+- `transport=relay` selects the relay without a code, for devices with encryption off.
+- Live only (no playback), H.265 video plus G.711 µ-law audio.
+- The relay serves one stream per channel, so `subtype` has no effect (verified on an
+  NVR-4-D-WIFI-C: both indexes returned the same 2560x1440 stream, about 1 Mbps).
+- With "stream encryption" on, video NALs and audio payloads that carry the RTP header
+  extension `0x4000` are AES-128-ECB scrambled with the code (zero-padded to 16 bytes); the
+  source decrypts them. A wrong code gives garbage video, a missing one fails with a message.
+- If the relay demands end-to-end (ECDH) encryption the source stops with an error; that
+  mode is not implemented.
+- TCP connects to the relay occasionally time out, so they are retried.

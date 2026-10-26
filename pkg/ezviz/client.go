@@ -13,6 +13,7 @@ import (
 //
 //	ezviz://ACCOUNT:PASSWORD@API_HOST/SERIAL?channel=1&subtype=main
 //	hikconnect://ACCOUNT:PASSWORD@api.hik-connect.com/L38239367?channel=1&subtype=sub
+//	hikconnect://ACCOUNT:PASSWORD@api.hik-connect.com/SERIAL?channel=1&code=VERIFICATION_CODE  (cloud relay)
 type config struct {
 	baseURL  string // https://API_HOST
 	account  string
@@ -20,6 +21,11 @@ type config struct {
 	serial   string // device serial
 	channel  int    // 1-based channel
 	subtype  string // "main" (busType main stream) | "sub"
+
+	// Cloud relay (VTM/VTDU over TCP) instead of direct P2P: selected by a
+	// verification code or transport=relay, for devices the P2P servers refuse.
+	relay bool
+	code  string // device verification code, decrypts scrambled relay media
 
 	// Playback (busType=2): set when the URL carries a start time. Live preview
 	// (busType=1) leaves these zero.
@@ -32,9 +38,9 @@ type config struct {
 type playbackMode int
 
 const (
-	modeLive       playbackMode = iota // no start: live preview (busType=1)
-	modeWindow                         // start+end: a fixed [start, stop] window
-	modeOpenEnded                      // start only: stream from start to the live edge
+	modeLive      playbackMode = iota // no start: live preview (busType=1)
+	modeWindow                        // start+end: a fixed [start, stop] window
+	modeOpenEnded                     // start only: stream from start to the live edge
 )
 
 func (c config) mode() playbackMode {
@@ -119,6 +125,8 @@ func parseURL(rawURL string) (config, error) {
 	if v := q.Get("subtype"); v != "" {
 		cfg.subtype = v
 	}
+	cfg.code = q.Get("code")
+	cfg.relay = cfg.code != "" || q.Get("transport") == "relay"
 
 	// Playback window. Presence of start switches the session to recording
 	// playback (busType=2). `end` is optional: with both ends it streams the fixed

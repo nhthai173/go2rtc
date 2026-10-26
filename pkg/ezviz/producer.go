@@ -14,16 +14,37 @@ import (
 // cloud P2P transport, emitting whole H.265/H.264 access units into go2rtc.
 type Producer struct {
 	core.Connection
-	client *Client
+	client frameSource
+}
+
+// frameSource is a transport that yields demuxed access units: the direct P2P
+// Client or the cloud relay.
+type frameSource interface {
+	ReadFrame() (*Frame, error)
+	Close() error
+	Protocol() string
+	RemoteAddr() string
 }
 
 func NewProducer(rawURL string) (*Producer, error) {
-	client, err := Dial(rawURL)
+	cfg, err := parseURL(rawURL)
 	if err != nil {
 		return nil, err
 	}
 
-	medias, err := probe(client)
+	var client frameSource
+	audio := &core.Codec{Name: core.CodecPCMA, ClockRate: 8000, PayloadType: 8}
+	if cfg.relay {
+		client, err = dialRelay(cfg)
+		audio = &core.Codec{Name: core.CodecPCMU, ClockRate: 8000, PayloadType: 0}
+	} else {
+		client, err = Dial(rawURL)
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	medias, err := probe(client, audio)
 	if err != nil {
 		_ = client.Close()
 		return nil, err
@@ -48,7 +69,7 @@ func NewProducer(rawURL string) (*Producer, error) {
 // arrives as its own single-NAL frame, so the sets are collected across frames;
 // building the codec from a lone VPS/SPS would advertise an SDP fmtp missing
 // sprop-sps/sprop-pps, which SDP-reliant RTSP/WebRTC consumers cannot decode.
-func probe(client *Client) ([]*core.Media, error) {
+func probe(client frameSource, audio *core.Codec) ([]*core.Media, error) {
 	var vcodec *core.Codec
 
 	paramSets := map[byte][]byte{}
@@ -112,7 +133,7 @@ func probe(client *Client) ([]*core.Media, error) {
 			// audio simply never produce packets on this track.
 			Kind:      core.KindAudio,
 			Direction: core.DirectionRecvonly,
-			Codecs:    []*core.Codec{{Name: core.CodecPCMA, ClockRate: 8000, PayloadType: 8}},
+			Codecs:    []*core.Codec{audio},
 		},
 	}, nil
 }
@@ -136,6 +157,8 @@ func (p *Producer) Start() error {
 			name, payload = core.CodecH264, annexb.EncodeToAVCC(f.Payload)
 		case CodecPCMA:
 			name, payload = core.CodecPCMA, f.Payload // raw G.711, forwarded verbatim
+		case CodecPCMU:
+			name, payload = core.CodecPCMU, f.Payload
 		default:
 			continue
 		}

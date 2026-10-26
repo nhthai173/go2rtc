@@ -7,6 +7,7 @@ const (
 	CodecH265 byte = iota + 1
 	CodecH264
 	CodecPCMA // G.711 A-law, 8 kHz mono — interleaved live audio
+	CodecPCMU // G.711 µ-law, 8 kHz mono — audio of the cloud relay
 )
 
 // Frame is one demuxed access unit handed up by the P2P transport (Client).
