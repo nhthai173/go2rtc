@@ -1,4 +1,4 @@
-// go2rtc trimmed for the TV app: Xiaomi and Dahua P2P sources in, RTSP out, API for login and streams.
+// go2rtc trimmed for the TV app: Xiaomi, Dahua P2P and Hik-Connect sources in, RTSP out, API for login and streams.
 // Leaving out the other modules shrinks the binary and keeps exec/ffmpeg off the local API.
 package main
 
@@ -6,6 +6,7 @@ import (
 	"github.com/AlexxIT/go2rtc/internal/api"
 	"github.com/AlexxIT/go2rtc/internal/app"
 	"github.com/AlexxIT/go2rtc/internal/easy4ip"
+	"github.com/AlexxIT/go2rtc/internal/ezviz"
 	"github.com/AlexxIT/go2rtc/internal/rtsp"
 	"github.com/AlexxIT/go2rtc/internal/streams"
 	"github.com/AlexxIT/go2rtc/internal/xiaomi"
@@ -19,6 +20,7 @@ func main() {
 	streams.Init()
 	rtsp.Init()
 	xiaomi.Init()
+	ezviz.Init()
 	easy4ip.Init()
 	shell.RunUntilSignal()
 	easy4ip.Shutdown() // end the devices' P2P sessions properly, or they hold them for ~30 s

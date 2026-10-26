@@ -25,6 +25,11 @@ func Init() {
 
 	// Account device/stream discovery for the "Add" page wizard.
 	api.HandleFunc("api/ezviz", apiDiscover)
+	api.HandleFunc("api/ezviz/records", apiRecords)
+	api.HandleFunc("api/ezviz/days", apiDays)
+	api.HandleFunc("api/ezviz/speed", apiSpeed)
+	api.HandleFunc("api/ezviz/ptz", apiPTZ)
+	api.HandleFunc("api/ezviz/channels", apiChannels)
 }
 
 // apiDiscover logs in to a Hik-Connect account and returns every channel/stream
@@ -88,4 +93,93 @@ func streamURL(host, account, password string, s ezviz.DiscoveredStream) string 
 	query.Set("subtype", s.Subtype)
 	u.RawQuery = query.Encode()
 	return u.String()
+}
+
+// apiRecords lists one day of recordings of a channel (motion clips have type
+// ALARM): ?account=&password=&serial=&channel=&day=2006-01-02[&host=].
+func apiRecords(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	host := q.Get("host")
+	if host == "" {
+		host = defaultHost
+	}
+	ch, _ := strconv.Atoi(q.Get("channel"))
+	recs, err := ezviz.Records("https://"+host, q.Get("account"), q.Get("password"), q.Get("serial"), max(ch, 1), q.Get("day"))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	api.ResponseJSON(w, recs)
+}
+
+// apiDays lists the days of a month that have recordings: same query as records,
+// with month=2006-01 instead of day.
+func apiDays(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	host := q.Get("host")
+	if host == "" {
+		host = defaultHost
+	}
+	ch, _ := strconv.Atoi(q.Get("channel"))
+	days, err := ezviz.RecordedDays("https://"+host, q.Get("account"), q.Get("password"), q.Get("serial"), max(ch, 1), q.Get("month"))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	api.ResponseJSON(w, days)
+}
+
+// apiSpeed changes the speed of the playback running on a channel:
+// ?serial=&channel=&speed=2. The relay keeps up with 2x; 4x and 8x are best effort.
+func apiSpeed(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	ch, _ := strconv.Atoi(q.Get("channel"))
+	n, _ := strconv.Atoi(q.Get("speed"))
+	if n < 1 {
+		http.Error(w, "speed must be a whole number of at least 1", http.StatusBadRequest)
+		return
+	}
+	if err := ezviz.SetPlaybackSpeed(q.Get("serial"), max(ch, 1), n); err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+}
+
+// apiPTZ presses or releases a PTZ control:
+// ?account=&password=&serial=&channel=&command=LEFT&action=START|STOP[&speed=5][&host=].
+func apiPTZ(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	host := q.Get("host")
+	if host == "" {
+		host = defaultHost
+	}
+	ch, _ := strconv.Atoi(q.Get("channel"))
+	speed, _ := strconv.Atoi(q.Get("speed"))
+	if speed < 1 {
+		speed = 5
+	}
+	action := strings.ToUpper(q.Get("action"))
+	if action != "START" && action != "STOP" {
+		http.Error(w, "action must be START or STOP", http.StatusBadRequest)
+		return
+	}
+	err := ezviz.PTZ("https://"+host, q.Get("account"), q.Get("password"), q.Get("serial"), max(ch, 1), strings.ToUpper(q.Get("command")), action, speed)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadGateway)
+	}
+}
+
+// apiChannels lists the cameras of an account: ?account=&password=[&host=] -> [{serial, channel, name, online}].
+func apiChannels(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	host := q.Get("host")
+	if host == "" {
+		host = defaultHost
+	}
+	chs, err := ezviz.Channels("https://"+host, q.Get("account"), q.Get("password"))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	api.ResponseJSON(w, chs)
 }
