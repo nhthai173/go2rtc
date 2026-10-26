@@ -29,7 +29,7 @@ func Init() {
 	api.HandleFunc("api/ezviz/days", apiDays)
 	api.HandleFunc("api/ezviz/speed", apiSpeed)
 	api.HandleFunc("api/ezviz/ptz", apiPTZ)
-	api.HandleFunc("api/ezviz/channels", apiChannels)
+	api.HandleFunc("api/ezviz/devices", apiDevices)
 }
 
 // apiDiscover logs in to a Hik-Connect account and returns every channel/stream
@@ -169,17 +169,17 @@ func apiPTZ(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// apiChannels lists the cameras of an account: ?account=&password=[&host=] -> [{serial, channel, name, online}].
-func apiChannels(w http.ResponseWriter, r *http.Request) {
+// apiDevices lists the devices of an account with their cameras: ?account=&password=[&host=].
+func apiDevices(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	host := q.Get("host")
 	if host == "" {
 		host = defaultHost
 	}
-	chs, err := ezviz.Channels("https://"+host, q.Get("account"), q.Get("password"))
+	devs, err := ezviz.Devices("https://"+host, q.Get("account"), q.Get("password"))
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		http.Error(w, err.Error(), http.StatusUnauthorized)
 		return
 	}
-	api.ResponseJSON(w, chs)
+	api.ResponseJSON(w, devs)
 }

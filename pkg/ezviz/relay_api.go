@@ -9,6 +9,7 @@ import (
 	"math/rand/v2"
 	"net/http"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -408,28 +409,48 @@ func PTZ(baseURL, account, password, serial string, channel int, command, action
 	return errors.New("ezviz: ptz: session rejected")
 }
 
-// Channel is one camera of an account device, as the account lists it.
-type Channel struct {
-	Serial string `json:"serial"`
-	No     int    `json:"channel"`
-	Name   string `json:"name"`
-	Online bool   `json:"online"`
+// Device is one device of the account with its cameras.
+type Device struct {
+	Serial   string    `json:"serial"`
+	Name     string    `json:"name"`
+	Type     string    `json:"type"`
+	Online   bool      `json:"online"`
+	Channels []Channel `json:"channels"`
 }
 
-// Channels lists every camera of the account once (Discover returns one row per stream quality).
-func Channels(baseURL, account, password string) ([]Channel, error) {
-	found, err := Discover(baseURL, account, password)
+// Channel is one camera of a [Device].
+type Channel struct {
+	No   int    `json:"channel"`
+	Name string `json:"name"`
+}
+
+// Devices lists the devices of the account and their cameras (the names the account app shows).
+func Devices(baseURL, account, password string) ([]Device, error) {
+	a, err := sessionFor(baseURL, account, password)
 	if err != nil {
 		return nil, err
 	}
-	var out []Channel
-	seen := map[string]bool{}
-	for _, f := range found {
-		k := fmt.Sprintf("%s/%d", f.Serial, f.Channel)
-		if !seen[k] {
-			seen[k] = true
-			out = append(out, Channel{f.Serial, f.Channel, f.DeviceName, f.Online})
+	devs, err := a.getDevices()
+	if err != nil {
+		dropSession(baseURL, account, password)
+		return nil, err
+	}
+	var out []Device
+	for _, d := range devs {
+		item := Device{Serial: d.Serial, Name: d.Name, Type: d.DeviceType, Online: d.Status == 1}
+		cams, err := a.getCameras(d.Serial)
+		if err != nil {
+			continue // one unreadable device must not hide the others
 		}
+		for _, c := range cams {
+			name := c.CameraName
+			if name == "" {
+				name = d.Name
+			}
+			item.Channels = append(item.Channels, Channel{c.ChannelNo, name})
+		}
+		sort.Slice(item.Channels, func(i, j int) bool { return item.Channels[i].No < item.Channels[j].No })
+		out = append(out, item)
 	}
 	return out, nil
 }
