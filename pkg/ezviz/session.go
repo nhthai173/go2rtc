@@ -29,6 +29,7 @@ import (
 	"io"
 	mrand "math/rand"
 	"net"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -76,10 +77,10 @@ type sessionConfig struct {
 	userID           string
 	clientID         uint32
 	channelNo        int
-	streamType       int    // 1=main, 2=sub
-	busType          int    // 1=live preview, 2=playback
-	startTime        string // playback window start, device format YYYY-MM-DDThh:mm:ss
-	stopTime         string // playback window end
+	streamType       int           // 1=main, 2=sub
+	busType          int           // 1=live preview, 2=playback
+	startTime        string        // playback window start, device format YYYY-MM-DDThh:mm:ss
+	stopTime         string        // playback window end
 	playbackIdle     time.Duration // >0 on playback: close with EOF after this much post-media silence
 }
 
@@ -570,9 +571,24 @@ func (s *session) receiveLoop() {
 	}
 }
 
+var dbgOn = os.Getenv("EZVIZ_DEBUG") != ""
+
+func dbg(format string, a ...any) {
+	if dbgOn {
+		fmt.Fprintf(os.Stderr, "ezviz-dbg "+format+"\n", a...)
+	}
+}
+
 func (s *session) handlePacket(buf []byte, src *net.UDPAddr) {
 	if len(buf) < 2 {
 		return
+	}
+	if dbgOn && buf[0]>>4 == 0xe || dbgOn && binary.BigEndian.Uint16(buf) >= 0x7000 {
+		n := len(buf)
+		if n > 24 {
+			n = 24
+		}
+		dbg("rx %s len=%d % x", src, len(buf), buf[:n])
 	}
 
 	// V3 messages from P2P servers (magic high nibble 0xE).
@@ -629,8 +645,10 @@ func (s *session) handleV3Response(buf []byte, src *net.UDPAddr) {
 		msg, err = DecodeV3Message(buf, nil)
 	}
 	if err != nil {
+		dbg("v3 decode error from %s: %v (encrypted=%v)", src, err, isEncrypted)
 		return
 	}
+	dbg("v3 msg type=0x%04x from %s attrs=%d", msg.MsgType, src, len(msg.Attrs))
 
 	switch msg.MsgType {
 	case OpTransforCtrl: // 0x0b03 — P2P_SETUP response
@@ -646,6 +664,13 @@ func (s *session) handleV3Response(buf []byte, src *net.UDPAddr) {
 // nested tag 0xFF sub-TLV (0x74 = "IP:PORT") and pre-punches to it so the
 // device's 0x0C00 can traverse our NAT.
 func (s *session) handleSetupResponse(msg V3Message) {
+	for _, a := range msg.Attrs {
+		v := a.Value
+		if len(v) > 48 {
+			v = v[:48]
+		}
+		dbg("  setup attr tag=0x%02x len=%d % x", a.Tag, len(a.Value), v)
+	}
 	var ff []byte
 	for _, a := range msg.Attrs {
 		if a.Tag == AttrEndMarker {

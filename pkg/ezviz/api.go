@@ -19,6 +19,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -105,6 +106,17 @@ type apiMeta struct {
 // login exchanges credentials for a session id and resolves the region API
 // domain. The password is sent as a lowercase hex MD5 digest.
 func (a *apiClient) login(account, password string) error {
+	err := a.loginOnce(account, password)
+	if err == errRedirect {
+		// code 1100: the account lives in another region, retry on the domain it named
+		err = a.loginOnce(account, password)
+	}
+	return err
+}
+
+var errRedirect = errors.New("ezviz: login redirect")
+
+func (a *apiClient) loginOnce(account, password string) error {
 	digest := md5.Sum([]byte(password))
 	form := url.Values{
 		"account":     {account},
@@ -136,6 +148,10 @@ func (a *apiClient) login(account, password string) error {
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
 		return fmt.Errorf("ezviz: login decode: %w", err)
+	}
+	if out.Meta.Code == 1100 && out.LoginArea.APIDomain != "" && out.LoginArea.APIDomain != a.apiDomain {
+		a.apiDomain = out.LoginArea.APIDomain
+		return errRedirect
 	}
 	if out.Meta.Code != 200 {
 		return fmt.Errorf("ezviz: login failed: %d %s", out.Meta.Code, out.Meta.Message)
